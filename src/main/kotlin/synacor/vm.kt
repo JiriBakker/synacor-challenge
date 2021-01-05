@@ -4,8 +4,66 @@ import java.io.File
 import java.math.BigInteger
 import java.util.Stack
 
-private fun readSynacorInput(): ByteArray {
-    return File("input/synacor/challenge.bin").readBytes()
+private class State(
+    var cursor: Int,
+    val memory: MutableList<Int>,
+    val registers: MutableMap<Int, Int>,
+    val stack: Stack<Int>,
+    val outputBuffer: StringBuilder,
+    val inputBuffer: ArrayDeque<Int>
+) {
+
+    constructor() : this(0, mutableListOf(), mutableMapOf(), Stack<Int>(), StringBuilder(), ArrayDeque()) {
+        (32768..32775).forEach { i -> registers[i] = 0 }
+
+        memory.addAll(readSynacorInput().toList().chunked(2).map { (low, high) -> toInt(low, high) })
+        while (memory.size < 32768) { memory.add(0) }
+    }
+
+    private fun readSynacorInput(): ByteArray {
+        return File("input/synacor/challenge.bin").readBytes()
+    }
+
+    private fun toInt(low: Byte, high: Byte): Int {
+        val bits = "${high.toUByte().toString(2).padStart(8, '0')}${low.toUByte().toString(2).padStart(8, '0')}"
+        return bits.toInt(2)
+    }
+
+    fun get(offset: Int): Int {
+        return memory[cursor + offset]
+    }
+
+    fun step(delta: Int): State {
+        cursor += delta
+        return this
+    }
+
+    fun jump(index: Int): State {
+        cursor = index
+        return this
+    }
+
+    fun clone(): State {
+        return State(
+            cursor + 0,
+            memory.toMutableList(),
+            registers.toMutableMap(),
+            stack.clone() as Stack<Int>,
+            StringBuilder(outputBuffer),
+            ArrayDeque(inputBuffer)
+        )
+    }
+
+    fun getOutput(): String {
+        val output = outputBuffer.toString()
+        outputBuffer.clear()
+        outputBuffer.append(output)
+        return output
+    }
+
+    fun clearOutput() {
+        outputBuffer.clear()
+    }
 }
 
 class VirtualMachine {
@@ -18,10 +76,10 @@ class VirtualMachine {
         //   set register <a> to the value of <b>
         SET(1),
         // push: 2 a
-        //   push <a> onto the stack
+        //   push <a> onto the state.stack
         PUSH(2),
         // pop: 3 a
-        //   remove the top element from the stack and write it into <a>; empty stack = error
+        //   remove the top element from the state.stack and write it into <a>; empty state.stack = error
         POP(3),
         // eq: 4 a b c
         //   set <a> to 1 if <b> is equal to <c>; set it to 0 otherwise
@@ -57,16 +115,16 @@ class VirtualMachine {
         //   stores 15-bit bitwise inverse of <b> in <a>
         NOT(14),
         // rmem: 15 a b
-        //   read memory at address <b> and write it to <a>
+        //   read state.memory at address <b> and write it to <a>
         READMEMORY(15),
         // wmem: 16 a b
-        //   write the value from <b> into memory at address <a>
+        //   write the value from <b> into state.memory at address <a>
         WRITEMEMORY(16),
         // call: 17 a
-        //   write the address of the next instruction to the stack and jump to <a>
+        //   write the address of the next instruction to the state.stack and jump to <a>
         CALL(17),
         // ret: 18
-        //   remove the top element from the stack and jump to it; empty stack = halt
+        //   remove the top element from the state.stack and jump to it; empty state.stack = halt
         RETURN(18),
         // out: 19 a
         //   write the character represented by ascii code <a> to the terminal
@@ -78,161 +136,184 @@ class VirtualMachine {
         //   no operation
         NOOP(21);
 
-    }
 
-    private val memory = mutableListOf<Int>()
-    private val registers = mutableMapOf<Int, Int>()
-    private val stack = Stack<Int>()
-
-    private val outputBuffer = StringBuilder()
-    private val inputBuffer = ArrayDeque<Int>()
-
-    init {
-        (32768..32775).forEach { i -> registers[i] = 0 }
-
-        memory.addAll(readSynacorInput().toList().chunked(2).map { (low, high) -> toInt(low, high) })
-        while (memory.size < 32768) { memory.add(0) }
-    }
-
-    private fun Int.toOperation(): Operation {
-        return Operation.values().firstOrNull { this == it.nr } ?: error("Unknown operation: $this")
-    }
-
-    private fun Int.getRegisterOrValue(): Int {
-        return registers[this] ?: this
-    }
-
-    private fun toInt(low: Byte, high: Byte): Int {
-        val bits = "${high.toUByte().toString(2).padStart(8, '0')}${low.toUByte().toString(2).padStart(8, '0')}"
-        //println("$bits = ${bits.toInt(2)}")
-        return bits.toInt(2)
-    }
-
-
-    fun execute() {
-        var cursor = 0
-        try {
-            while (cursor in memory.indices) {
-                cursor = step(cursor)
-                //println("Cursor moved to $cursor")
+        companion object {
+            fun fromInt(value: Int): Operation {
+                return values().firstOrNull { value == it.nr }
+                    ?: error("Unknown operation: $value")
             }
-        } finally {
-            println("$outputBuffer")
         }
     }
 
-    private fun step(cursor: Int): Int {
-        val operation = memory[cursor].toOperation()
-        //println("Next operation: $operation")
+    private fun Int.getRegisterOrValue(state: State): Int {
+        return state.registers[this] ?: this
+    }
+
+    fun execute() {
+        var state = State()
+        try {
+            while (state.cursor in state.memory.indices) {
+                state = step(state)
+            }
+        } finally {
+            println("${state.outputBuffer}")
+        }
+    }
+
+    private val states = mutableListOf<State>()
+
+    private val script = ArrayDeque(File("input/synacor/start-script").readLines())
+
+    fun addToScript(commands: List<String>) {
+        script.addAll(commands)
+    }
+
+    private fun rewind(delta: Int): State {
+        repeat(delta) { states.removeLast() }
+        val state = states.removeLast()
+        state.inputBuffer.clear()
+        return state
+    }
+
+    private fun step(state: State): State {
+        val operation = Operation.fromInt(state.get(0))
         return when (operation) {
-            Operation.HALT -> -1
+            Operation.HALT -> {
+                println(state.getOutput())
+                println("ERROR! Program was going to terminate. Rewinding..")
+                rewind(0)
+            }
             Operation.SET -> {
-                registers[memory[cursor + 1]] = memory[cursor + 2].getRegisterOrValue()
-                cursor + 3
+                state.registers[state.get(1)] = state.get(2).getRegisterOrValue(state)
+                state.step(3)
             }
             Operation.PUSH -> {
-                stack.push(memory[cursor + 1].getRegisterOrValue())
-                cursor + 2
+                state.stack.push(state.get(1).getRegisterOrValue(state))
+                state.step(2)
             }
             Operation.POP -> {
-                registers[memory[cursor + 1]] = stack.pop()
-                cursor + 2
+                state.registers[state.get(1)] = state.stack.pop()
+                state.step(2)
             }
             Operation.EQUALS -> {
-                registers[memory[cursor + 1]] =
-                    if (memory[cursor + 2].getRegisterOrValue() == memory[cursor + 3].getRegisterOrValue()) 1
+                state.registers[state.get(1)] =
+                    if (state.get(2).getRegisterOrValue(state) == state.get(3).getRegisterOrValue(state)) 1
                     else 0
-                cursor + 4
+                state.step(4)
             }
             Operation.GREATERTHAN -> {
-                registers[memory[cursor + 1]] =
-                    if (memory[cursor + 2].getRegisterOrValue() > memory[cursor + 3].getRegisterOrValue()) 1
+                state.registers[state.get(1)] =
+                    if (state.get(2).getRegisterOrValue(state) > state.get(3).getRegisterOrValue(state)) 1
                     else 0
-                cursor + 4
+                state.step(4)
             }
-            Operation.JUMP -> memory[cursor + 1].getRegisterOrValue()
+            Operation.JUMP -> state.jump(state.get(1).getRegisterOrValue(state))
             Operation.JUMPTRUE -> {
-                val value = memory[cursor + 1].getRegisterOrValue()
+                val value = state.get(1).getRegisterOrValue(state)
                 if (value != 0) {
-                    memory[cursor + 2].getRegisterOrValue()
+                    state.jump(state.get(2).getRegisterOrValue(state))
                 } else {
-                    cursor + 3
+                    state.step(3)
                 }
             }
             Operation.JUMPFALSE -> {
-                val value = memory[cursor + 1].getRegisterOrValue()
+                val value = state.get(1).getRegisterOrValue(state)
                 if (value == 0) {
-                    memory[cursor + 2].getRegisterOrValue()
+                    state.jump(state.get(2).getRegisterOrValue(state))
                 } else {
-                    cursor + 3
+                    state.step(3)
                 }
             }
             Operation.ADD -> {
-                registers[memory[cursor + 1]] = (memory[cursor + 2].getRegisterOrValue() + memory[cursor + 3].getRegisterOrValue()) % 32768
-                cursor + 4
+                state.registers[state.get(1)] = (state.get(2).getRegisterOrValue(state) + state.get(3).getRegisterOrValue(state)) % 32768
+                state.step(4)
             }
             Operation.MULTIPLY -> {
-                registers[memory[cursor + 1]] = (memory[cursor + 2].getRegisterOrValue() * memory[cursor + 3].getRegisterOrValue()) % 32768
-                cursor + 4
+                state.registers[state.get(1)] = (state.get(2).getRegisterOrValue(state) * state.get(3).getRegisterOrValue(state)) % 32768
+                state.step(4)
             }
             Operation.MOD -> {
-                registers[memory[cursor + 1]] = (memory[cursor + 2].getRegisterOrValue() % memory[cursor + 3].getRegisterOrValue()) % 32768
-                cursor + 4
+                state.registers[state.get(1)] = (state.get(2).getRegisterOrValue(state) % state.get(3).getRegisterOrValue(state)) % 32768
+                state.step(4)
             }
             Operation.AND -> {
-                registers[memory[cursor + 1]] = (memory[cursor + 2].getRegisterOrValue() and memory[cursor + 3].getRegisterOrValue()) % 32768
-                cursor + 4
+                state.registers[state.get(1)] = (state.get(2).getRegisterOrValue(state) and state.get(3).getRegisterOrValue(state)) % 32768
+                state.step(4)
             }
             Operation.OR -> {
-                registers[memory[cursor + 1]] = (memory[cursor + 2].getRegisterOrValue() or memory[cursor + 3].getRegisterOrValue()) % 32768
-                cursor + 4
+                state.registers[state.get(1)] = (state.get(2).getRegisterOrValue(state) or state.get(3).getRegisterOrValue(state)) % 32768
+                state.step(4)
             }
             Operation.NOT -> {
-                var inverse = BigInteger.valueOf(memory[cursor + 2].getRegisterOrValue().toLong())
+                var inverse = BigInteger.valueOf(state.get(2).getRegisterOrValue(state).toLong())
                 (0 until 15).forEach { inverse = inverse.flipBit(it) }
-                registers[memory[cursor + 1]] = inverse.toInt()
-                cursor + 3
+                state.registers[state.get(1)] = inverse.toInt()
+                state.step(3)
             }
             Operation.READMEMORY -> {
-                registers[memory[cursor + 1]] = memory[memory[cursor + 2].getRegisterOrValue()]!!
-                cursor + 3
+                state.registers[state.get(1)] = state.memory[state.get(2).getRegisterOrValue(state)]!!
+                state.step(3)
             }
             Operation.WRITEMEMORY -> {
-                memory[memory[cursor + 1].getRegisterOrValue()] = memory[cursor + 2].getRegisterOrValue()
-                cursor + 3
+                state.memory[state.get(1).getRegisterOrValue(state)] = state.get(2).getRegisterOrValue(state)
+                state.step(3)
             }
             Operation.CALL -> {
-                stack.push(cursor + 2)
-                memory[cursor + 1].getRegisterOrValue()
+                state.stack.push(state.cursor + 2)
+                state.jump(state.get(1).getRegisterOrValue(state))
             }
             Operation.RETURN -> {
-                if (stack.isEmpty()) {
-                    -1
+                if (state.stack.isEmpty()) {
+                    println(state.getOutput())
+                    println("ERROR! Program was going to terminate. Rewinding..")
+                    rewind(0)
                 } else {
-                    stack.pop()
+                    state.jump(state.stack.pop())
                 }
             }
             Operation.OUT -> {
-                val char = memory[cursor + 1].getRegisterOrValue().toChar()
-                outputBuffer.append(char)
-                cursor + 2
+                val char = state.get(1).getRegisterOrValue(state).toChar()
+                state.outputBuffer.append(char)
+                state.step(2)
             }
             Operation.IN -> {
-                if (outputBuffer.isNotEmpty()) {
-                    println(outputBuffer.toString())
-                    outputBuffer.clear()
+                if (state.getOutput().isNotEmpty()) {
+                    println(state.getOutput())
                 }
 
-                if (inputBuffer.isEmpty()) {
-                    val input = readLine()!!
-                    input.forEach { inputBuffer.addLast(it.toInt()) }
-                    inputBuffer.addLast('\n'.toInt())
+                var curState = state
+                if (curState.inputBuffer.isEmpty()) {
+                    states.add(curState.clone())
+
+                    var input: String
+                    if (script.isNotEmpty()) {
+                        input = script.removeFirst()
+                        println("Manual action -> $input")
+                    } else {
+                        input = readLine()!!
+                        if (input.startsWith("rewind ")) {
+                            val delta = input.drop(7).toInt()
+                            curState = rewind(delta)
+                            input = "look"
+                        }
+                    }
+
+                    if (input == "halt") {
+                        error("Manually halted")
+                    }
+
+                    input.forEach { curState.inputBuffer.addLast(it.toInt()) }
+                    curState.inputBuffer.addLast('\n'.toInt())
                 }
 
-                registers[memory[cursor + 1]] = inputBuffer.removeFirst()
-                cursor + 2
+                curState.clearOutput()
+
+                curState.registers[curState.get(1)] = curState.inputBuffer.removeFirst()
+                curState.step(2)
             }
-            Operation.NOOP -> cursor + 1
+            Operation.NOOP -> state.step(1)
         }
     }
+
+
 }

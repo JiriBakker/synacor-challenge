@@ -9,6 +9,7 @@ private fun time(func: () -> Unit) {
 
 fun main() {
     val vm = VirtualMachine()
-    time { vm.execute() }
-
+    try {
+        time { vm.execute() }
+    } catch (e: Exception) {}
 }
