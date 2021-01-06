@@ -47,4 +47,4 @@ use concave coin
 use corroded coin
 go north
 take teleporter
-use teleporter
+register 8 25734

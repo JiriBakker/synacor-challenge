@@ -13,6 +13,8 @@ private class State(
     val inputBuffer: ArrayDeque<Int>
 ) {
 
+    val fullOutputBuffer = StringBuilder()
+
     constructor() : this(0, mutableListOf(), mutableMapOf(), Stack<Int>(), StringBuilder(), ArrayDeque()) {
         (32768..32775).forEach { i -> registers[i] = 0 }
 
@@ -52,6 +54,11 @@ private class State(
             StringBuilder(outputBuffer),
             ArrayDeque(inputBuffer)
         )
+    }
+
+    fun addOutput(char: Char) {
+        outputBuffer.append(char)
+        fullOutputBuffer.append(char)
     }
 
     fun getOutput(): String {
@@ -136,7 +143,6 @@ class VirtualMachine {
         //   no operation
         NOOP(21);
 
-
         companion object {
             fun fromInt(value: Int): Operation {
                 return values().firstOrNull { value == it.nr }
@@ -149,15 +155,24 @@ class VirtualMachine {
         return state.registers[this] ?: this
     }
 
-    fun execute() {
+    fun execute(): String {
         var state = State()
+
+        applyTeleporterModifications(state)
+
         try {
             while (state.cursor in state.memory.indices) {
                 state = step(state)
             }
         } finally {
-            println("${state.outputBuffer}")
+            return state.fullOutputBuffer.toString()
         }
+    }
+
+    private fun applyTeleporterModifications(state: State) {
+        state.memory[5489] = 21
+        state.memory[5490] = 21
+        state.memory[5493] = 6
     }
 
     private val states = mutableListOf<State>()
@@ -175,12 +190,15 @@ class VirtualMachine {
         return state
     }
 
+    private fun log(message: String) {
+        println(message)
+    }
+
     private fun step(state: State): State {
         val operation = Operation.fromInt(state.get(0))
         return when (operation) {
             Operation.HALT -> {
-                println(state.getOutput())
-                println("ERROR! Program was going to terminate. Rewinding..")
+                log("ERROR! Program was going to terminate. Rewinding..")
                 rewind(0)
             }
             Operation.SET -> {
@@ -196,18 +214,22 @@ class VirtualMachine {
                 state.step(2)
             }
             Operation.EQUALS -> {
-                state.registers[state.get(1)] =
+                val value =
                     if (state.get(2).getRegisterOrValue(state) == state.get(3).getRegisterOrValue(state)) 1
                     else 0
+                state.registers[state.get(1)] = value
                 state.step(4)
             }
             Operation.GREATERTHAN -> {
-                state.registers[state.get(1)] =
+                val value =
                     if (state.get(2).getRegisterOrValue(state) > state.get(3).getRegisterOrValue(state)) 1
                     else 0
+                state.registers[state.get(1)] = value
                 state.step(4)
             }
-            Operation.JUMP -> state.jump(state.get(1).getRegisterOrValue(state))
+            Operation.JUMP -> {
+                state.jump(state.get(1).getRegisterOrValue(state))
+            }
             Operation.JUMPTRUE -> {
                 val value = state.get(1).getRegisterOrValue(state)
                 if (value != 0) {
@@ -225,23 +247,28 @@ class VirtualMachine {
                 }
             }
             Operation.ADD -> {
-                state.registers[state.get(1)] = (state.get(2).getRegisterOrValue(state) + state.get(3).getRegisterOrValue(state)) % 32768
+                val value = (state.get(2).getRegisterOrValue(state) + state.get(3).getRegisterOrValue(state)) % 32768
+                state.registers[state.get(1)] = value
                 state.step(4)
             }
             Operation.MULTIPLY -> {
-                state.registers[state.get(1)] = (state.get(2).getRegisterOrValue(state) * state.get(3).getRegisterOrValue(state)) % 32768
+                val value = (state.get(2).getRegisterOrValue(state) * state.get(3).getRegisterOrValue(state)) % 32768
+                state.registers[state.get(1)] = value
                 state.step(4)
             }
             Operation.MOD -> {
-                state.registers[state.get(1)] = (state.get(2).getRegisterOrValue(state) % state.get(3).getRegisterOrValue(state)) % 32768
+                val value = (state.get(2).getRegisterOrValue(state) % state.get(3).getRegisterOrValue(state)) % 32768
+                state.registers[state.get(1)] = value
                 state.step(4)
             }
             Operation.AND -> {
-                state.registers[state.get(1)] = (state.get(2).getRegisterOrValue(state) and state.get(3).getRegisterOrValue(state)) % 32768
+                val value = (state.get(2).getRegisterOrValue(state) and state.get(3).getRegisterOrValue(state)) % 32768
+                state.registers[state.get(1)] = value
                 state.step(4)
             }
             Operation.OR -> {
-                state.registers[state.get(1)] = (state.get(2).getRegisterOrValue(state) or state.get(3).getRegisterOrValue(state)) % 32768
+                val value = (state.get(2).getRegisterOrValue(state) or state.get(3).getRegisterOrValue(state)) % 32768
+                state.registers[state.get(1)] = value
                 state.step(4)
             }
             Operation.NOT -> {
@@ -264,8 +291,7 @@ class VirtualMachine {
             }
             Operation.RETURN -> {
                 if (state.stack.isEmpty()) {
-                    println(state.getOutput())
-                    println("ERROR! Program was going to terminate. Rewinding..")
+                    log("ERROR! Program was going to terminate. Rewinding..")
                     rewind(0)
                 } else {
                     state.jump(state.stack.pop())
@@ -273,12 +299,12 @@ class VirtualMachine {
             }
             Operation.OUT -> {
                 val char = state.get(1).getRegisterOrValue(state).toChar()
-                state.outputBuffer.append(char)
+                state.addOutput(char)
                 state.step(2)
             }
             Operation.IN -> {
                 if (state.getOutput().isNotEmpty()) {
-                    println(state.getOutput())
+                    log(state.getOutput())
                 }
 
                 var curState = state
@@ -288,7 +314,10 @@ class VirtualMachine {
                     var input: String
                     if (script.isNotEmpty()) {
                         input = script.removeFirst()
-                        println("Manual action -> $input")
+                        log("Manual action -> $input")
+                        if (input == "halt") {
+                            error("Manually halted")
+                        }
                     } else {
                         input = readLine()!!
                         if (input.startsWith("rewind ")) {
@@ -296,6 +325,12 @@ class VirtualMachine {
                             curState = rewind(delta)
                             input = "look"
                         }
+                    }
+
+                    if (input.startsWith("register ")) {
+                        val (registerIndex, value) = input.drop(9).split(" ").map { it.toInt() }
+                        curState.registers[32768 + registerIndex - 1] = value
+                        input = "use teleporter"
                     }
 
                     if (input == "halt") {
@@ -311,9 +346,10 @@ class VirtualMachine {
                 curState.registers[curState.get(1)] = curState.inputBuffer.removeFirst()
                 curState.step(2)
             }
-            Operation.NOOP -> state.step(1)
+            Operation.NOOP -> {
+                state.step(1)
+            }
         }
     }
-
 
 }
